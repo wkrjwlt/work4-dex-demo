@@ -5,13 +5,13 @@ import { useReadContract } from 'wagmi'
 import { POOL_MANAGER_ABI } from '@/lib/contracts'
 import { CONTRACTS, TOKENS } from '@/lib/constants'
 import { formatUnits } from 'viem'
-import Image from 'next/image'
 import { Table, Input, Button, Space } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import React from 'react'
 import { getPriceAtTick, getPriceAtSqrtRatio } from '@/lib/tickMath'
 import { SearchOutlined, ReloadOutlined, PlusOutlined } from '@ant-design/icons'
 import { AddLiquidityModal } from './AddLiquidityModal'
+import { Droplets } from 'lucide-react'
 
 interface PoolInfo {
   pool: string
@@ -257,13 +257,11 @@ export const PoolList = forwardRef<PoolListRef>((props, ref) => {
   if (!pools || processedPools.length === 0) {
     return (
       <div className="text-center py-12">
-        <Image
-          src="/img/pool.png"
-          alt="No pools"
-          width={120}
-          height={120}
-          className="mx-auto mb-4 opacity-50"
-        />
+        <div className="mx-auto mb-4 flex justify-center">
+          <div className="w-28 h-28 bg-linear-to-br from-blue-100 to-cyan-100 rounded-full flex items-center justify-center">
+            <Droplets className="w-14 h-14 text-blue-400 opacity-60" />
+          </div>
+        </div>
         <p className="text-gray-600 text-lg">No pools available yet</p>
         <p className="text-gray-400 text-sm mt-2">Create the first pool to get started!</p>
       </div>

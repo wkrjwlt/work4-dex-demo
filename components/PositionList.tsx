@@ -4,11 +4,11 @@ import { useReadContract, useAccount, useWriteContract, useWaitForTransactionRec
 import { POSITION_MANAGER_ABI } from '@/lib/contracts'
 import { CONTRACTS, TOKENS } from '@/lib/constants'
 import { formatUnits } from 'viem'
-import Image from 'next/image'
 import { Table, Button, Space, message, Tooltip } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import React, { useMemo, useState, useEffect } from 'react'
 import { getPriceAtTick } from '@/lib/tickMath'
+import { Layers } from 'lucide-react'
 
 interface PositionInfo {
   id: bigint
@@ -148,13 +148,11 @@ export function PositionList() {
   if (!positions || userPositions.length === 0) {
     return (
       <div className="text-center py-12">
-        <Image
-          src="/img/liquidity.webp"
-          alt="No positions"
-          width={120}
-          height={120}
-          className="mx-auto mb-4 opacity-50"
-        />
+        <div className="mx-auto mb-4 flex justify-center">
+          <div className="w-28 h-28 bg-linear-to-br from-indigo-100 to-purple-100 rounded-full flex items-center justify-center">
+            <Layers className="w-14 h-14 text-indigo-400 opacity-60" />
+          </div>
+        </div>
         <p className="text-gray-600 text-lg">No positions found</p>
         <p className="text-gray-400 text-sm mt-2">Add liquidity to create your first position!</p>
       </div>
