@@ -357,15 +357,6 @@ export const PoolList = forwardRef<PoolListRef>((props, ref) => {
       ),
     },
     {
-      title: 'Current Tick',
-      dataIndex: 'tick',
-      key: 'tick',
-      width: 100,
-      render: (tick: number) => (
-        <span className="text-gray-600 text-sm">{tick}</span>
-      ),
-    },
-    {
       title: 'Liquidity',
       dataIndex: 'liquidity',
       key: 'liquidity',
