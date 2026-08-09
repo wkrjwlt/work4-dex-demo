@@ -1,6 +1,14 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  // 静态导出配置（用于 Cloudflare Pages）
+  output: 'export',
+
+  // 图片优化配置（静态导出不支持 next/image 优化）
+  images: {
+    unoptimized: true,
+  },
+
   webpack: (config, { isServer }) => {
     // 忽略特定的可选依赖
     config.externals = config.externals || [];
