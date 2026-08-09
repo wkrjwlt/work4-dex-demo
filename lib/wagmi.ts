@@ -14,7 +14,7 @@ const SEPOLIA_RPC_URLS = [
 // 配置支持的链
 export const config = getDefaultConfig({
   appName: 'MetaNodeSwap',
-  projectId: process.env.NEXT_PUBLIC_WALLET_CONNECT_PROJECT_ID || 'YOUR_PROJECT_ID',
+  projectId: process.env.NEXT_PUBLIC_WALLET_CONNECT_PROJECT_ID || '0029f9c8592dd69181c6ee9806187bb4',
   chains: [sepolia],
   transports: {
     // 使用 fallback 配置多个 RPC 端点，自动切换
