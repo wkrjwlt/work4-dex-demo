@@ -5,7 +5,7 @@ import { useReadContract } from 'wagmi'
 import { POOL_MANAGER_ABI } from '@/lib/contracts'
 import { CONTRACTS, TOKENS } from '@/lib/constants'
 import { formatUnits } from 'viem'
-import { Table, Input, Button, Space } from 'antd'
+import { Table, Input, Button, Space, App } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import React from 'react'
 import { getPriceAtTick, getPriceAtSqrtRatio } from '@/lib/tickMath'
@@ -66,7 +66,9 @@ export interface PoolListRef {
 }
 
 export const PoolList = forwardRef<PoolListRef>((props, ref) => {
+  const { message } = App.useApp() // ✅ 使用 antd App 的 message API
   const [searchText, setSearchText] = useState('')
+  const [isRefreshing, setIsRefreshing] = useState(false) // ✅ 新增：刷新状态
   const [addLiquidityPool, setAddLiquidityPool] = useState<{
     token0: string
     token1: string
@@ -78,9 +80,27 @@ export const PoolList = forwardRef<PoolListRef>((props, ref) => {
     functionName: 'getAllPools',
   })
 
+  // ✅ 新增：处理刷新的函数
+  const handleRefresh = async () => {
+    try {
+      setIsRefreshing(true)
+      console.log('🔄 Refreshing pool list...')
+
+      await refetch()
+
+      console.log('✅ Pool list refreshed successfully')
+      message.success('池子列表已刷新')
+    } catch (err) {
+      console.error('❌ Failed to refresh pool list:', err)
+      message.error('刷新失败，请重试')
+    } finally {
+      setIsRefreshing(false)
+    }
+  }
+
   // 暴露 refetch 方法给父组件
   useImperativeHandle(ref, () => ({
-    refetch
+    refetch: handleRefresh
   }))
 
   // 输出真实的合约读取结果
@@ -200,7 +220,7 @@ export const PoolList = forwardRef<PoolListRef>((props, ref) => {
           </div>
           <Button
             type="primary"
-            onClick={() => refetch()}
+            onClick={handleRefresh}
             className="mt-4"
           >
             重新加载
@@ -228,9 +248,10 @@ export const PoolList = forwardRef<PoolListRef>((props, ref) => {
           </div>
           <Button
             icon={<ReloadOutlined />}
-            onClick={() => refetch()}
+            onClick={handleRefresh}
             size="large"
             className="flex items-center"
+            loading={isRefreshing}
           >
             刷新
           </Button>
@@ -416,9 +437,10 @@ export const PoolList = forwardRef<PoolListRef>((props, ref) => {
         </div>
         <Button
           icon={<ReloadOutlined />}
-          onClick={() => refetch()}
+          onClick={handleRefresh}
           size="large"
           className="flex items-center"
+          loading={isRefreshing}
         >
           刷新
         </Button>
@@ -454,7 +476,7 @@ export const PoolList = forwardRef<PoolListRef>((props, ref) => {
           initialToken1={addLiquidityPool.token1}
           onSuccess={() => {
             console.log('✅ 流动性添加成功，刷新池子列表')
-            refetch()
+            handleRefresh()
           }}
         />
       )}

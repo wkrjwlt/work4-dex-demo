@@ -19,6 +19,9 @@ export interface SwapParams {
   indexPath?: number[]
   tokenInDecimals?: number
   tokenOutDecimals?: number
+  isExactInput?: boolean  // true: exactInput, false: exactOutput
+  amountOut?: string      // for exactOutput
+  preloadedPools?: PoolInfo[]  // ✅ 新增：预加载的池子列表，避免重复查询
 }
 
 export interface PoolInfo {
@@ -43,6 +46,10 @@ interface QuoteResult {
   indexPathUsed?: number[]
   warning?: string
   availablePools?: PoolInfo[] // 添加可用池子列表
+}
+
+interface GetQuoteParams extends SwapParams {
+  preloadedPools?: PoolInfo[]  // ✅ 新增：预加载的池子列表，避免重复查询
 }
 
 // Gas限制常量
@@ -216,7 +223,7 @@ export function useSwap() {
   }, [])
 
   // 获取价格预估 - 使用simulateContract模拟合约调用
-  const getQuote = useCallback(async (params: SwapParams): Promise<QuoteResult | null> => {
+  const getQuote = useCallback(async (params: GetQuoteParams): Promise<QuoteResult | null> => {
     if (!params.amountIn || parseFloat(params.amountIn) === 0) {
       return null
     }
@@ -231,6 +238,7 @@ export function useSwap() {
     console.log('tokenOut:', params.tokenOut)
     console.log('amountIn:', params.amountIn)
     console.log('indexPath:', params.indexPath)
+    console.log('preloadedPools:', params.preloadedPools ? `${params.preloadedPools.length} pools` : 'none')
 
     try {
       const tokenInDecimals = params.tokenInDecimals ?? getTokenDecimals(params.tokenIn)
@@ -250,134 +258,164 @@ export function useSwap() {
       console.log('actualTokenIn:', actualTokenIn)
       console.log('actualTokenOut:', actualTokenOut)
 
-      // ✅ 使用 getPool() 直接查询池子，而不是 getAllPools()
-      const WETH_SEPOLIA = '0xfff9976782d46cc05630d1f6ebab18b2324d6b14'
-      const WETH_MAINNET = '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2'
+      // ✅ 新增：使用预加载的池子列表，避免重复查询
+      let matchedPools: any[] = []
 
-      // 确保地址顺序正确（token0 < token1）
-      let [sortedToken0, sortedToken1] = actualTokenIn.toLowerCase() < actualTokenOut.toLowerCase()
-        ? [actualTokenIn.toLowerCase(), actualTokenOut.toLowerCase()]
-        : [actualTokenOut.toLowerCase(), actualTokenIn.toLowerCase()]
+      if (params.preloadedPools && params.preloadedPools.length > 0) {
+        console.log('✅ Using preloaded pools (避免重复查询)')
+        matchedPools = params.preloadedPools.map(pool => ({
+          pool: pool.pool,
+          token0: pool.token0,
+          token1: pool.token1,
+          index: pool.index,
+          fee: pool.fee,
+          tick: pool.tick || 0,
+          sqrtPriceX96: pool.sqrtPriceX96,
+          liquidity: pool.liquidity,
+        }))
+      } else {
+        // 如果没有预加载，才进行查询
+        console.log('⚠️ No preloaded pools, querying from chain...')
 
-      console.log('Querying pools for:', sortedToken0, '/', sortedToken1)
+        const WETH_SEPOLIA = '0xfff9976782d46cc05630d1f6ebab18b2324d6b14'
+        const WETH_MAINNET = '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2'
 
-      // 尝试查询多个池子索引
-      const matchedPools: any[] = []
-      for (let i = 0; i <= 10; i++) {
-        try {
-          const poolAddress = await publicClient.readContract({
-            address: CONTRACTS.POOL_MANAGER as `0x${string}`,
-            abi: POOL_MANAGER_ABI,
-            functionName: 'getPool',
-            args: [sortedToken0 as `0x${string}`, sortedToken1 as `0x${string}`, i],
-          })
+        // 确保地址顺序正确（token0 < token1）
+        let [sortedToken0, sortedToken1] = actualTokenIn.toLowerCase() < actualTokenOut.toLowerCase()
+          ? [actualTokenIn.toLowerCase(), actualTokenOut.toLowerCase()]
+          : [actualTokenOut.toLowerCase(), actualTokenIn.toLowerCase()]
 
-          if (poolAddress && poolAddress !== '0x0000000000000000000000000000000000000000') {
-            console.log(`✅ Found pool at index ${i}: ${poolAddress}`)
+        console.log('Querying pools for:', sortedToken0, '/', sortedToken1)
 
-            // 获取池子详细信息
-            try {
-              const POOL_ABI = [
-                {
-                  name: 'token0',
-                  type: 'function',
-                  stateMutability: 'view',
-                  inputs: [],
-                  outputs: [{ name: '', type: 'address' }],
-                },
-                {
-                  name: 'token1',
-                  type: 'function',
-                  stateMutability: 'view',
-                  inputs: [],
-                  outputs: [{ name: '', type: 'address' }],
-                },
-                {
-                  name: 'fee',
-                  type: 'function',
-                  stateMutability: 'view',
-                  inputs: [],
-                  outputs: [{ name: '', type: 'uint24' }],
-                },
-                {
-                  name: 'liquidity',
-                  type: 'function',
-                  stateMutability: 'view',
-                  inputs: [],
-                  outputs: [{ name: '', type: 'uint128' }],
-                },
-                {
-                  name: 'sqrtPriceX96',
-                  type: 'function',
-                  stateMutability: 'view',
-                  inputs: [],
-                  outputs: [{ name: '', type: 'uint160' }],
-                },
-                {
-                  name: 'tick',
-                  type: 'function',
-                  stateMutability: 'view',
-                  inputs: [],
-                  outputs: [{ name: '', type: 'int24' }],
-                },
-              ] as const
+        // ✅ 改进：动态查询，直到连续遇到空池子
+        const MAX_EMPTY_POOLS = 3  // 连续遇到3个空池子时停止
+        let emptyCount = 0
+        let index = 0
 
-              const [poolToken0, poolToken1, fee, liquidity, sqrtPriceX96, tick] = await Promise.all([
-                publicClient.readContract({
-                  address: poolAddress,
-                  abi: POOL_ABI,
-                  functionName: 'token0',
-                }),
-                publicClient.readContract({
-                  address: poolAddress,
-                  abi: POOL_ABI,
-                  functionName: 'token1',
-                }),
-                publicClient.readContract({
-                  address: poolAddress,
-                  abi: POOL_ABI,
-                  functionName: 'fee',
-                }),
-                publicClient.readContract({
-                  address: poolAddress,
-                  abi: POOL_ABI,
-                  functionName: 'liquidity',
-                }),
-                publicClient.readContract({
-                  address: poolAddress,
-                  abi: POOL_ABI,
-                  functionName: 'sqrtPriceX96',
-                }),
-                publicClient.readContract({
-                  address: poolAddress,
-                  abi: POOL_ABI,
-                  functionName: 'tick',
-                }),
-              ])
+        while (emptyCount < MAX_EMPTY_POOLS) {
+          try {
+            const poolAddress = await publicClient.readContract({
+              address: CONTRACTS.POOL_MANAGER as `0x${string}`,
+              abi: POOL_MANAGER_ABI,
+              functionName: 'getPool',
+              args: [sortedToken0 as `0x${string}`, sortedToken1 as `0x${string}`, index],
+            })
 
-              matchedPools.push({
-                pool: poolAddress,
-                token0: poolToken0,
-                token1: poolToken1,
-                index: i,
-                fee: Number(fee),
-                tick: Number(tick),
-                sqrtPriceX96: sqrtPriceX96 as bigint,
-                liquidity: liquidity as bigint,
-              })
+            if (poolAddress && poolAddress !== '0x0000000000000000000000000000000000000000') {
+              console.log(`✅ Found pool at index ${index}: ${poolAddress}`)
+              emptyCount = 0  // 重置计数器
 
-              console.log(`  Fee: ${fee}, Liquidity: ${liquidity}`)
-            } catch (error) {
-              console.log(`  ⚠️  Could not fetch pool details for ${poolAddress}`)
+              // 获取池子详细信息
+              try {
+                const POOL_ABI = [
+                  {
+                    name: 'token0',
+                    type: 'function',
+                    stateMutability: 'view',
+                    inputs: [],
+                    outputs: [{ name: '', type: 'address' }],
+                  },
+                  {
+                    name: 'token1',
+                    type: 'function',
+                    stateMutability: 'view',
+                    inputs: [],
+                    outputs: [{ name: '', type: 'address' }],
+                  },
+                  {
+                    name: 'fee',
+                    type: 'function',
+                    stateMutability: 'view',
+                    inputs: [],
+                    outputs: [{ name: '', type: 'uint24' }],
+                  },
+                  {
+                    name: 'liquidity',
+                    type: 'function',
+                    stateMutability: 'view',
+                    inputs: [],
+                    outputs: [{ name: '', type: 'uint128' }],
+                  },
+                  {
+                    name: 'sqrtPriceX96',
+                    type: 'function',
+                    stateMutability: 'view',
+                    inputs: [],
+                    outputs: [{ name: '', type: 'uint160' }],
+                  },
+                  {
+                    name: 'tick',
+                    type: 'function',
+                    stateMutability: 'view',
+                    inputs: [],
+                    outputs: [{ name: '', type: 'int24' }],
+                  },
+                ] as const
+
+                const [poolToken0, poolToken1, fee, liquidity, sqrtPriceX96, tick] = await Promise.all([
+                  publicClient.readContract({
+                    address: poolAddress,
+                    abi: POOL_ABI,
+                    functionName: 'token0',
+                  }),
+                  publicClient.readContract({
+                    address: poolAddress,
+                    abi: POOL_ABI,
+                    functionName: 'token1',
+                  }),
+                  publicClient.readContract({
+                    address: poolAddress,
+                    abi: POOL_ABI,
+                    functionName: 'fee',
+                  }),
+                  publicClient.readContract({
+                    address: poolAddress,
+                    abi: POOL_ABI,
+                    functionName: 'liquidity',
+                  }),
+                  publicClient.readContract({
+                    address: poolAddress,
+                    abi: POOL_ABI,
+                    functionName: 'sqrtPriceX96',
+                  }),
+                  publicClient.readContract({
+                    address: poolAddress,
+                    abi: POOL_ABI,
+                    functionName: 'tick',
+                  }),
+                ])
+
+                matchedPools.push({
+                  pool: poolAddress,
+                  token0: poolToken0,
+                  token1: poolToken1,
+                  index: index,  // ✅ 使用动态索引
+                  fee: Number(fee),
+                  tick: Number(tick),
+                  sqrtPriceX96: sqrtPriceX96 as bigint,
+                  liquidity: liquidity as bigint,
+                })
+
+                console.log(`  Fee: ${fee}, Liquidity: ${liquidity}`)
+              } catch (error) {
+                console.log(`  ⚠️  Could not fetch pool details for ${poolAddress}`)
+              }
+            } else {
+              // 池子地址为空，增加空计数
+              emptyCount++
+              console.log(`  Empty pool at index ${index}, empty count: ${emptyCount}`)
             }
+          } catch (error) {
+            // 查询失败，可能是索引超出范围
+            emptyCount++
+            console.log(`  No pool at index ${index}, empty count: ${emptyCount}`)
           }
-        } catch (error) {
-          // 索引不存在，停止查询
-          break
-        }
-      }
 
-      console.log(`Total pools found: ${matchedPools.length}`)
+          index++  // 移动到下一个索引
+        }
+
+        console.log(`Total pools found: ${matchedPools.length}`)
+      }
 
       // 过滤掉没有流动性的池子
       const poolsWithLiquidity = matchedPools.filter(pool => Number(pool.liquidity) > 0)
@@ -691,13 +729,12 @@ export function useSwap() {
       let amountOutWei: bigint | undefined
 
       try {
-        // 使用estimateContractGas触发revert，然后解析数据
-        // 合约设计：quoteExactInput会revert携带(amount0, amount1)
-        console.log('Calling quoteExactInput (will revert with quote data)...')
+        // ✅ 修复：quoteExactInput 是正常的 view 函数，应该使用 readContract 调用
+        // 而不是 estimateContractGas 等待 revert
+        console.log('Calling quoteExactInput (view function)...')
 
         try {
-          // 尝试调用，预期会revert
-          await publicClient.estimateContractGas({
+          const quoteResult = await publicClient.readContract({
             address: CONTRACTS.SWAP_ROUTER as `0x${string}`,
             abi: SWAP_ROUTER_ABI,
             functionName: 'quoteExactInput',
@@ -708,66 +745,20 @@ export function useSwap() {
               amountIn: amountInWei,
               sqrtPriceLimitX96,
             }],
-            account: address as `0x${string}`,
           })
 
-          // 如果没revert，说明有问题
-          console.warn('quoteExactInput did not revert as expected')
-          throw new Error('Quote function did not revert')
+          // 解析返回值
+          amountOutWei = quoteResult as bigint
 
-        } catch (estimateError: any) {
-          // 预期会revert，解析revert数据
-          // 格式: 64字节的 (amount0, amount1)
-          const errorData = estimateError.data || estimateError.cause?.data || estimateError.error?.data
+          console.log('✅ Contract quote result:', amountOutWei.toString())
 
-          console.log('Quote revert data:', errorData)
-
-          if (errorData && typeof errorData === 'string' && errorData.length >= 130) {
-            try {
-              // 解析amount0和amount1（都是int256，32字节）
-              // 格式: 0x + amount0(64字符) + amount1(64字符) = 总共130字符
-              const amount0Hex = errorData.slice(2, 66)
-              const amount1Hex = errorData.slice(66, 130)
-
-              // 转换为BigInt（可能是负数）
-              let amount0 = BigInt('0x' + amount0Hex)
-              let amount1 = BigInt('0x' + amount1Hex)
-
-              // 处理负数（二进制补码）
-              // 如果最高位是1，说明是负数
-              if (amount0 >> 255n !== 0n) {
-                amount0 = amount0 - (1n << 256n)
-              }
-              if (amount1 >> 255n !== 0n) {
-                amount1 = amount1 - (1n << 256n)
-              }
-
-              console.log('Parsed from revert:', {
-                amount0: amount0.toString(),
-                amount1: amount1.toString()
-              })
-
-              // 确定输出：zeroForOne时，amount1是输出（负值）
-              if (zeroForOne) {
-                amountOutWei = amount1 < 0n ? -amount1 : amount1
-              } else {
-                amountOutWei = amount0 < 0n ? -amount0 : amount0
-              }
-
-              console.log('✅ Contract quote result:', amountOutWei.toString())
-
-              if (amountOutWei === 0n) {
-                throw new Error('Contract returned 0 output')
-              }
-
-            } catch (parseError) {
-              console.error('Failed to parse revert data:', parseError)
-              throw estimateError
-            }
-          } else {
-            console.warn('Revert data too short or invalid:', errorData?.length)
-            throw estimateError
+          if (!amountOutWei || amountOutWei === 0n) {
+            throw new Error('Contract returned 0 output')
           }
+
+        } catch (readError: any) {
+          console.error('Failed to call quoteExactInput:', readError)
+          throw readError
         }
 
         // 验证获取到的报价
@@ -901,15 +892,14 @@ export function useSwap() {
             throw new Error('Invalid calculation result')
           }
 
-          // 应用更激进的安全边际（15%），因为：
-          // 1. Uniswap V3的集中流动性比恒定乘积复杂
-          // 2. 池子状态在计算和交易之间可能变化
-          // 3. 需要覆盖链上执行的额外成本
-          estimatedOut = estimatedOut * 0.85
+          // ✅ 移除 15% 安全边际，因为：
+          // 1. 我们应该使用合约的真实报价
+          // 2. 如果合约报价失败，用户应该知道这是一个估算值
+          // 3. Slippage 设置已经提供了保护
 
           amountOutWei = parseUnits(estimatedOut.toFixed(6), tokenOutDecimals)
-          console.log(`✅ Final fallback (with 15% safety margin): ${estimatedOut.toFixed(6)}`)
-          console.log('✅ Fallback amountOutWei:', amountOutWei.toString())
+          console.log(`✅ Fallback amountOutWei (no safety margin): ${estimatedOut.toFixed(6)}`)
+          console.log('⚠️ Warning: Using fallback calculation, result may be less accurate')
 
         } catch (calcError) {
           console.error('❌ Fallback calculation failed:', calcError)
@@ -1108,12 +1098,31 @@ export function useSwap() {
 
     console.log('\n===== executeSwap called =====')
     console.log('indexPath from params:', params.indexPath)
+    console.log('isExactInput:', params.isExactInput)
     console.log('================================\n')
 
     const tokenInDecimals = params.tokenInDecimals ?? getTokenDecimals(params.tokenIn)
     const tokenOutDecimals = params.tokenOutDecimals ?? getTokenDecimals(params.tokenOut)
 
-    const amountInWei = parseUnits(params.amountIn, tokenInDecimals)
+    // ✅ 修复：根据 isExactInput 决定使用哪个金额
+    const isExactInput = params.isExactInput !== false  // 默认为 true
+
+    let amountInWei: bigint
+    let amountOutWei: bigint = 0n  // ✅ 初始化为 0n
+
+    if (isExactInput) {
+      // exactInput: 输入固定
+      amountInWei = parseUnits(params.amountIn, tokenInDecimals)
+    } else {
+      // exactOutput: 输出固定
+      if (!params.amountOut) {
+        throw new Error('amountOut is required for exactOutput swap')
+      }
+      amountOutWei = parseUnits(params.amountOut, tokenOutDecimals)
+      // 对于 exactOutput，需要先计算需要的 amountIn
+      // 这里暂时使用 amountIn 参数，后续会通过报价更新
+      amountInWei = parseUnits(params.amountIn, tokenInDecimals)
+    }
 
     // ✅ 新逻辑：自动包装 ETH（如果需要）
     const isNativeTokenIn = isNativeTokenAddress(params.tokenIn)
@@ -1140,7 +1149,7 @@ export function useSwap() {
     // 使用 getQuote 返回的 indexPath（已经通过 getPool() 查询）
     const indexPath = quote.indexPathUsed ?? [0]
 
-    // 计算最小输出
+    // 计算最小输出（exactInput）或最大输入（exactOutput）
     const amountOut = parseFloat(quote.amountOut)
     const token0Symbol = Object.values(TOKENS).find(t => t.address.toLowerCase() === actualTokenIn.toLowerCase())?.symbol || 'Token0'
     const token1Symbol = Object.values(TOKENS).find(t => t.address.toLowerCase() === actualTokenOut.toLowerCase())?.symbol || 'Token1'
@@ -1164,6 +1173,7 @@ export function useSwap() {
     console.log('Effective slippage:', effectiveSlippage, '%')
     console.log('Expected output:', quote.amountOut)
     console.log('Min output (with slippage):', formatUnits(minAmountOut, tokenOutDecimals))
+    console.log('Swap type:', isExactInput ? 'exactInput' : 'exactOutput')
     console.log('==============================\n')
 
     // 准备交易参数
@@ -1184,17 +1194,6 @@ export function useSwap() {
     console.log('sqrtPriceLimitX96:', sqrtPriceLimitX96.toString())
     console.log('(Using MIN/MAX_SQRT_RATIO as per Uniswap V3 standard)')
     console.log('=========================\n')
-
-    const swapParams = {
-      tokenIn: actualTokenIn as `0x${string}`,
-      tokenOut: actualTokenOut as `0x${string}`,
-      indexPath: indexPath,
-      recipient: address,
-      deadline,
-      amountIn: amountInWei,
-      amountOutMinimum: minAmountOut,
-      sqrtPriceLimitX96,
-    }
 
     // 预检：检查余额和授权
     // ✅ 修复：检查 actualTokenIn（ETH 已经被转换成 WETH）
@@ -1243,50 +1242,118 @@ export function useSwap() {
 
     console.log('\n💡 Note: ETH was wrapped to WETH in previous transaction, so no ETH value sent here')
 
-    // 估算gas
+    // 估算gas和执行交易
     console.log('\n===== Gas Estimation =====')
     console.log('Estimating gas for swap...')
-    const gas = await estimateGasWithCap({
-      address: CONTRACTS.SWAP_ROUTER as `0x${string}`,
-      abi: SWAP_ROUTER_ABI,
-      functionName: 'exactInput',
-      args: [swapParams],
-      value,
-      fallbackGas: SWAP_GAS_FALLBACK,
-    })
-    console.log('Estimated gas:', gas.toString())
-    console.log('=========================\n')
 
-    console.log('\n===== Executing Swap =====')
-    console.log('Calling writeContract...')
-    console.log('Swap params:', JSON.stringify({
-      tokenIn: swapParams.tokenIn,
-      tokenOut: swapParams.tokenOut,
-      indexPath: swapParams.indexPath,
-      recipient: swapParams.recipient,
-      deadline: swapParams.deadline.toString(),
-      amountIn: swapParams.amountIn.toString(),
-      amountOutMinimum: swapParams.amountOutMinimum.toString(),
-      sqrtPriceLimitX96: swapParams.sqrtPriceLimitX96.toString(),
-    }, null, 2))
+    // ✅ 修复：分别处理 exactInput 和 exactOutput
+    if (isExactInput) {
+      const swapParams = {
+        tokenIn: actualTokenIn as `0x${string}`,
+        tokenOut: actualTokenOut as `0x${string}`,
+        indexPath: indexPath,
+        recipient: address,
+        deadline,
+        amountIn: amountInWei,
+        amountOutMinimum: minAmountOut,
+        sqrtPriceLimitX96,
+      }
 
-    try {
-      writeContract({
+      const gas = await estimateGasWithCap({
         address: CONTRACTS.SWAP_ROUTER as `0x${string}`,
         abi: SWAP_ROUTER_ABI,
         functionName: 'exactInput',
         args: [swapParams],
         value,
-        gas,
+        fallbackGas: SWAP_GAS_FALLBACK,
       })
-      console.log('✅ writeContract called successfully')
-      console.log('==========================\n')
-    } catch (writeError) {
-      console.error('❌ writeContract failed:', writeError)
-      console.error('Error details:', JSON.stringify(writeError, null, 2))
-      throw writeError
+      console.log('Estimated gas:', gas.toString())
+      console.log('=========================\n')
+
+      console.log('\n===== Executing exactInput Swap =====')
+      console.log('Calling writeContract...')
+      console.log('Swap params:', JSON.stringify({
+        tokenIn: swapParams.tokenIn,
+        tokenOut: swapParams.tokenOut,
+        indexPath: swapParams.indexPath,
+        recipient: swapParams.recipient,
+        deadline: swapParams.deadline.toString(),
+        amountIn: swapParams.amountIn.toString(),
+        amountOutMinimum: swapParams.amountOutMinimum.toString(),
+        sqrtPriceLimitX96: swapParams.sqrtPriceLimitX96.toString(),
+      }, null, 2))
+
+      try {
+        writeContract({
+          address: CONTRACTS.SWAP_ROUTER as `0x${string}`,
+          abi: SWAP_ROUTER_ABI,
+          functionName: 'exactInput',
+          args: [swapParams],
+          value,
+          gas,
+        })
+        console.log('✅ writeContract called successfully')
+        console.log('==========================\n')
+      } catch (writeError) {
+        console.error('❌ writeContract failed:', writeError)
+        console.error('Error details:', JSON.stringify(writeError, null, 2))
+        throw writeError
+      }
+    } else {
+      // exactOutput
+      const swapParams = {
+        tokenIn: actualTokenIn as `0x${string}`,
+        tokenOut: actualTokenOut as `0x${string}`,
+        indexPath: indexPath,
+        recipient: address,
+        deadline,
+        amountOut: amountOutWei,
+        amountInMaximum: amountInWei,  // 最大可接受的输入
+        sqrtPriceLimitX96,
+      }
+
+      const gas = await estimateGasWithCap({
+        address: CONTRACTS.SWAP_ROUTER as `0x${string}`,
+        abi: SWAP_ROUTER_ABI,
+        functionName: 'exactOutput',
+        args: [swapParams],
+        value,
+        fallbackGas: SWAP_GAS_FALLBACK,
+      })
+      console.log('Estimated gas:', gas.toString())
+      console.log('=========================\n')
+
+      console.log('\n===== Executing exactOutput Swap =====')
+      console.log('Calling writeContract...')
+      console.log('Swap params:', JSON.stringify({
+        tokenIn: swapParams.tokenIn,
+        tokenOut: swapParams.tokenOut,
+        indexPath: swapParams.indexPath,
+        recipient: swapParams.recipient,
+        deadline: swapParams.deadline.toString(),
+        amountOut: swapParams.amountOut.toString(),
+        amountInMaximum: swapParams.amountInMaximum.toString(),
+        sqrtPriceLimitX96: swapParams.sqrtPriceLimitX96.toString(),
+      }, null, 2))
+
+      try {
+        writeContract({
+          address: CONTRACTS.SWAP_ROUTER as `0x${string}`,
+          abi: SWAP_ROUTER_ABI,
+          functionName: 'exactOutput',
+          args: [swapParams],
+          value,
+          gas,
+        })
+        console.log('✅ writeContract called successfully')
+        console.log('==========================\n')
+      } catch (writeError) {
+        console.error('❌ writeContract failed:', writeError)
+        console.error('Error details:', JSON.stringify(writeError, null, 2))
+        throw writeError
+      }
     }
-  }, [address, writeContract, getQuote, publicClient, estimateGasWithCap])
+  }, [address, writeContract, getQuote, publicClient, estimateGasWithCap, checkAndWrapETHIfNeeded])
 
   // 反向报价：输入tokenOut数量，计算需要的tokenIn数量
   const getReverseQuote = useCallback(async (params: {
@@ -1296,6 +1363,7 @@ export function useSwap() {
     tokenInDecimals?: number
     tokenOutDecimals?: number
     indexPath?: number[]
+    preloadedPools?: PoolInfo[]  // ✅ 新增：预加载的池子列表
   }): Promise<{ amountIn: string; indexPathUsed: number[] } | null> => {
     if (!params.amountOut || parseFloat(params.amountOut) === 0) {
       return null
@@ -1329,121 +1397,150 @@ export function useSwap() {
       console.log('actualTokenIn:', actualTokenIn)
       console.log('actualTokenOut:', actualTokenOut)
 
-      // ✅ 使用 getPool() 直接查询池子，而不是 getAllPools()
-      const WETH_SEPOLIA = '0xfff9976782d46cc05630d1f6ebab18b2324d6b14'
-      const WETH_MAINNET = '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2'
+      // ✅ 新增：使用预加载的池子列表，避免重复查询
+      let matchedPools: any[] = []
 
-      // 确保地址顺序正确（token0 < token1）
-      let [sortedToken0, sortedToken1] = actualTokenIn.toLowerCase() < actualTokenOut.toLowerCase()
-        ? [actualTokenIn.toLowerCase(), actualTokenOut.toLowerCase()]
-        : [actualTokenOut.toLowerCase(), actualTokenIn.toLowerCase()]
+      if (params.preloadedPools && params.preloadedPools.length > 0) {
+        console.log('✅ Using preloaded pools for reverse quote (避免重复查询)')
+        matchedPools = params.preloadedPools.map(pool => ({
+          pool: pool.pool,
+          token0: pool.token0,
+          token1: pool.token1,
+          index: pool.index,
+          fee: pool.fee,
+          sqrtPriceX96: pool.sqrtPriceX96,
+          liquidity: pool.liquidity,
+        }))
+      } else {
+        // 如果没有预加载，才进行查询
+        console.log('⚠️ No preloaded pools for reverse quote, querying from chain...')
 
-      console.log('Querying pools for reverse quote:', sortedToken0, '/', sortedToken1)
+        const WETH_SEPOLIA = '0xfff9976782d46cc05630d1f6ebab18b2324d6b14'
+        const WETH_MAINNET = '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2'
 
-      // 尝试查询多个池子索引
-      const matchedPools: any[] = []
-      for (let i = 0; i <= 10; i++) {
-        try {
-          const poolAddress = await publicClient.readContract({
-            address: CONTRACTS.POOL_MANAGER as `0x${string}`,
-            abi: POOL_MANAGER_ABI,
-            functionName: 'getPool',
-            args: [sortedToken0 as `0x${string}`, sortedToken1 as `0x${string}`, i],
-          })
+        // 确保地址顺序正确（token0 < token1）
+        let [sortedToken0, sortedToken1] = actualTokenIn.toLowerCase() < actualTokenOut.toLowerCase()
+          ? [actualTokenIn.toLowerCase(), actualTokenOut.toLowerCase()]
+          : [actualTokenOut.toLowerCase(), actualTokenIn.toLowerCase()]
 
-          if (poolAddress && poolAddress !== '0x0000000000000000000000000000000000000000') {
-            console.log(`✅ Found pool at index ${i}: ${poolAddress}`)
+        console.log('Querying pools for reverse quote:', sortedToken0, '/', sortedToken1)
 
-            // 获取池子详细信息
-            try {
-              const POOL_ABI = [
-                {
-                  name: 'token0',
-                  type: 'function',
-                  stateMutability: 'view',
-                  inputs: [],
-                  outputs: [{ name: '', type: 'address' }],
-                },
-                {
-                  name: 'token1',
-                  type: 'function',
-                  stateMutability: 'view',
-                  inputs: [],
-                  outputs: [{ name: '', type: 'address' }],
-                },
-                {
-                  name: 'fee',
-                  type: 'function',
-                  stateMutability: 'view',
-                  inputs: [],
-                  outputs: [{ name: '', type: 'uint24' }],
-                },
-                {
-                  name: 'liquidity',
-                  type: 'function',
-                  stateMutability: 'view',
-                  inputs: [],
-                  outputs: [{ name: '', type: 'uint128' }],
-                },
-                {
-                  name: 'sqrtPriceX96',
-                  type: 'function',
-                  stateMutability: 'view',
-                  inputs: [],
-                  outputs: [{ name: '', type: 'uint160' }],
-                },
-              ] as const
+        // ✅ 改进：动态查询，直到连续遇到空池子
+        const MAX_EMPTY_POOLS = 3  // 连续遇到3个空池子时停止
+        let emptyCount = 0
+        let index = 0
 
-              const [poolToken0, poolToken1, fee, liquidity, sqrtPriceX96] = await Promise.all([
-                publicClient.readContract({
-                  address: poolAddress,
-                  abi: POOL_ABI,
-                  functionName: 'token0',
-                }),
-                publicClient.readContract({
-                  address: poolAddress,
-                  abi: POOL_ABI,
-                  functionName: 'token1',
-                }),
-                publicClient.readContract({
-                  address: poolAddress,
-                  abi: POOL_ABI,
-                  functionName: 'fee',
-                }),
-                publicClient.readContract({
-                  address: poolAddress,
-                  abi: POOL_ABI,
-                  functionName: 'liquidity',
-                }),
-                publicClient.readContract({
-                  address: poolAddress,
-                  abi: POOL_ABI,
-                  functionName: 'sqrtPriceX96',
-                }),
-              ])
+        while (emptyCount < MAX_EMPTY_POOLS) {
+          try {
+            const poolAddress = await publicClient.readContract({
+              address: CONTRACTS.POOL_MANAGER as `0x${string}`,
+              abi: POOL_MANAGER_ABI,
+              functionName: 'getPool',
+              args: [sortedToken0 as `0x${string}`, sortedToken1 as `0x${string}`, index],
+            })
 
-              matchedPools.push({
-                pool: poolAddress,
-                token0: poolToken0,
-                token1: poolToken1,
-                index: i,
-                fee: Number(fee),
-                sqrtPriceX96: sqrtPriceX96 as bigint,
-                liquidity: liquidity as bigint,
-              })
+            if (poolAddress && poolAddress !== '0x0000000000000000000000000000000000000000') {
+              console.log(`✅ Found pool at index ${index}: ${poolAddress}`)
+              emptyCount = 0  // 重置计数器
 
-              console.log(`  Fee: ${fee}, Liquidity: ${liquidity}`)
-            } catch (error) {
-              console.log(`  ⚠️  Could not fetch pool details for ${poolAddress}`)
+              // 获取池子详细信息
+              try {
+                const POOL_ABI = [
+                  {
+                    name: 'token0',
+                    type: 'function',
+                    stateMutability: 'view',
+                    inputs: [],
+                    outputs: [{ name: '', type: 'address' }],
+                  },
+                  {
+                    name: 'token1',
+                    type: 'function',
+                    stateMutability: 'view',
+                    inputs: [],
+                    outputs: [{ name: '', type: 'address' }],
+                  },
+                  {
+                    name: 'fee',
+                    type: 'function',
+                    stateMutability: 'view',
+                    inputs: [],
+                    outputs: [{ name: '', type: 'uint24' }],
+                  },
+                  {
+                    name: 'liquidity',
+                    type: 'function',
+                    stateMutability: 'view',
+                    inputs: [],
+                    outputs: [{ name: '', type: 'uint128' }],
+                  },
+                  {
+                    name: 'sqrtPriceX96',
+                    type: 'function',
+                    stateMutability: 'view',
+                    inputs: [],
+                    outputs: [{ name: '', type: 'uint160' }],
+                  },
+                ] as const
+
+                const [poolToken0, poolToken1, fee, liquidity, sqrtPriceX96] = await Promise.all([
+                  publicClient.readContract({
+                    address: poolAddress,
+                    abi: POOL_ABI,
+                    functionName: 'token0',
+                  }),
+                  publicClient.readContract({
+                    address: poolAddress,
+                    abi: POOL_ABI,
+                    functionName: 'token1',
+                  }),
+                  publicClient.readContract({
+                    address: poolAddress,
+                    abi: POOL_ABI,
+                    functionName: 'fee',
+                  }),
+                  publicClient.readContract({
+                    address: poolAddress,
+                    abi: POOL_ABI,
+                    functionName: 'liquidity',
+                  }),
+                  publicClient.readContract({
+                    address: poolAddress,
+                    abi: POOL_ABI,
+                    functionName: 'sqrtPriceX96',
+                  }),
+                ])
+
+                matchedPools.push({
+                  pool: poolAddress,
+                  token0: poolToken0,
+                  token1: poolToken1,
+                  index: index,  // ✅ 使用动态索引
+                  fee: Number(fee),
+                  sqrtPriceX96: sqrtPriceX96 as bigint,
+                  liquidity: liquidity as bigint,
+                })
+
+                console.log(`  Fee: ${fee}, Liquidity: ${liquidity}`)
+              } catch (error) {
+                console.log(`  ⚠️  Could not fetch pool details for ${poolAddress}`)
+              }
+            } else {
+              // 池子地址为空，增加空计数
+              emptyCount++
+              console.log(`  Empty pool at index ${index}, empty count: ${emptyCount}`)
             }
+          } catch (error) {
+            // 查询失败，可能是索引超出范围
+            emptyCount++
+            console.log(`  No pool at index ${index}, empty count: ${emptyCount}`)
           }
-        } catch (error) {
-          // 索引不存在，停止查询
-          break
-        }
-      }
 
-      console.log(`Total pools found: ${matchedPools.length}`)
+          index++  // 移动到下一个索引
+        }
+
+        console.log(`Total pools found: ${matchedPools.length}`)
+      }
 
       // 输出所有匹配的池子详细信息
       matchedPools.forEach((pool, idx) => {

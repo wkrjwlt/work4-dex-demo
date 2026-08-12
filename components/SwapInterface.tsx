@@ -45,6 +45,7 @@ export function SwapInterface() {
   const [quoteError, setQuoteError] = useState<string | null>(null)
   const [showPoolSelector, setShowPoolSelector] = useState(false)
   const [showCreatePoolModal, setShowCreatePoolModal] = useState(false) // 创建池子模态框
+  const [pendingSwapAfterApprove, setPendingSwapAfterApprove] = useState(false) // ✅ 新增：标记授权后是否需要继续交易
 
   // ✅ 使用 getPool() 直接查询池子，而不是 getAllPools()
   const publicClient = usePublicClient()
@@ -63,132 +64,67 @@ export function SwapInterface() {
 
       // 将 ETH 地址转换为 WETH 地址
       const WETH_SEPOLIA = '0xfff9976782d46cc05630d1f6ebab18b2324d6b14'
-      const WETH_MAINNET = '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2'
       const ETH_ADDRESS = '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE'
 
       const actualTokenIn = isNativeTokenAddress(formData.tokenIn) ? WETH_SEPOLIA : formData.tokenIn
       const actualTokenOut = isNativeTokenAddress(formData.tokenOut) ? WETH_SEPOLIA : formData.tokenOut
 
-      // 确保地址顺序正确（token0 < token1）
-      let [sortedToken0, sortedToken1] = actualTokenIn.toLowerCase() < actualTokenOut.toLowerCase()
-        ? [actualTokenIn.toLowerCase(), actualTokenOut.toLowerCase()]
-        : [actualTokenOut.toLowerCase(), actualTokenIn.toLowerCase()]
+      // ✅ 优化：使用 getAllPools() 一次性获取所有池子
+      // 只需要 1 次 RPC 调用，而不是循环查询 N 次
+      console.log(`🔄 Querying pools for pair: ${actualTokenIn} / ${actualTokenOut}`)
+      const startTime = Date.now()
 
-      console.log('Querying pools for:', sortedToken0, '/', sortedToken1)
+      try {
+        const allPools = await publicClient.readContract({
+          address: CONTRACTS.POOL_MANAGER as `0x${string}`,
+          abi: POOL_MANAGER_ABI,
+          functionName: 'getAllPools',
+        })
 
-      // 尝试查询多个池子索引
-      const foundPools: PoolInfo[] = []
-      for (let i = 0; i <= 10; i++) {
-        try {
-          const poolAddress = await publicClient.readContract({
-            address: CONTRACTS.POOL_MANAGER as `0x${string}`,
-            abi: POOL_MANAGER_ABI,
-            functionName: 'getPool',
-            args: [sortedToken0 as `0x${string}`, sortedToken1 as `0x${string}`, i],
+        const fetchTime = Date.now() - startTime
+        console.log(`✅ Got ${allPools.length} pools in ${fetchTime}ms`)
+
+        // 前端过滤特定代币对的池子
+        const foundPools: PoolInfo[] = allPools
+          .filter((pool: any) => {
+            const matchNormal =
+              pool.token0.toLowerCase() === actualTokenIn.toLowerCase() &&
+              pool.token1.toLowerCase() === actualTokenOut.toLowerCase()
+            const matchReverse =
+              pool.token0.toLowerCase() === actualTokenOut.toLowerCase() &&
+              pool.token1.toLowerCase() === actualTokenIn.toLowerCase()
+            return matchNormal || matchReverse
+          })
+          .map((pool: any) => {
+            // 计算价格合理性
+            const sqrtPrice = Number(pool.sqrtPriceX96) / (2 ** 96)
+            const priceRatio = sqrtPrice ** 2
+            const isPriceReasonable = priceRatio > 0.000001 && priceRatio < 1000000
+
+            return {
+              pool: pool.pool,
+              token0: pool.token0,
+              token1: pool.token1,
+              index: Number(pool.index),
+              fee: Number(pool.fee),
+              tick: Number(pool.tick),
+              sqrtPriceX96: pool.sqrtPriceX96,
+              liquidity: pool.liquidity,
+              priceRatio,
+              isPriceReasonable,
+            }
           })
 
-          if (poolAddress && poolAddress !== '0x0000000000000000000000000000000000000000') {
-            console.log(`✅ Found pool at index ${i}: ${poolAddress}`)
+        console.log(`✅ Found ${foundPools.length} pools for this pair`)
+        foundPools.forEach((pool) => {
+          console.log(`  Pool #${pool.index}: Fee=${(pool.fee/10000).toFixed(2)}%, Liquidity=${pool.liquidity.toString()}, PriceRatio=${pool.priceRatio.toFixed(6)}`)
+        })
 
-            // 获取池子详细信息
-            try {
-              const POOL_ABI = [
-                {
-                  name: 'token0',
-                  type: 'function',
-                  stateMutability: 'view',
-                  inputs: [],
-                  outputs: [{ name: '', type: 'address' }],
-                },
-                {
-                  name: 'token1',
-                  type: 'function',
-                  stateMutability: 'view',
-                  inputs: [],
-                  outputs: [{ name: '', type: 'address' }],
-                },
-                {
-                  name: 'fee',
-                  type: 'function',
-                  stateMutability: 'view',
-                  inputs: [],
-                  outputs: [{ name: '', type: 'uint24' }],
-                },
-                {
-                  name: 'liquidity',
-                  type: 'function',
-                  stateMutability: 'view',
-                  inputs: [],
-                  outputs: [{ name: '', type: 'uint128' }],
-                },
-                {
-                  name: 'sqrtPriceX96',
-                  type: 'function',
-                  stateMutability: 'view',
-                  inputs: [],
-                  outputs: [{ name: '', type: 'uint160' }],
-                },
-              ] as const
-
-              const [poolToken0, poolToken1, fee, liquidity, sqrtPriceX96] = await Promise.all([
-                publicClient.readContract({
-                  address: poolAddress,
-                  abi: POOL_ABI,
-                  functionName: 'token0',
-                }),
-                publicClient.readContract({
-                  address: poolAddress,
-                  abi: POOL_ABI,
-                  functionName: 'token1',
-                }),
-                publicClient.readContract({
-                  address: poolAddress,
-                  abi: POOL_ABI,
-                  functionName: 'fee',
-                }),
-                publicClient.readContract({
-                  address: poolAddress,
-                  abi: POOL_ABI,
-                  functionName: 'liquidity',
-                }),
-                publicClient.readContract({
-                  address: poolAddress,
-                  abi: POOL_ABI,
-                  functionName: 'sqrtPriceX96',
-                }),
-              ])
-
-              // 计算价格合理性
-              const sqrtPrice = Number(sqrtPriceX96) / (2 ** 96)
-              const priceRatio = sqrtPrice ** 2
-              const isPriceReasonable = priceRatio > 0.000001 && priceRatio < 1000000
-
-              foundPools.push({
-                pool: poolAddress as string,
-                token0: poolToken0 as string,
-                token1: poolToken1 as string,
-                index: i,
-                fee: Number(fee),
-                tick: 0,
-                sqrtPriceX96: sqrtPriceX96 as bigint,
-                liquidity: liquidity as bigint,
-                priceRatio,
-                isPriceReasonable,
-              })
-
-              console.log(`  Fee: ${fee}, Liquidity: ${liquidity}, PriceRatio: ${priceRatio.toFixed(6)}`)
-            } catch (error) {
-              console.log(`  ⚠️  Could not fetch pool details for ${poolAddress}`)
-            }
-          }
-        } catch (error) {
-          // 索引不存在，停止查询
-          break
-        }
+        setAvailablePools(foundPools)
+      } catch (error) {
+        console.error('❌ Failed to fetch pools:', error)
+        setAvailablePools([])
       }
-
-      console.log(`Total pools found: ${foundPools.length}`)
-      setAvailablePools(foundPools)
     }
 
     queryPoolsForPair()
@@ -251,9 +187,11 @@ export function SwapInterface() {
   }, [primaryPoolIndex])
 
   // 获取当前池子信息
+  // ✅ 优先使用 selectedPoolIndex（智能路由或手动选择），回退到 formData.poolIndex
   const selectedPool = useMemo(() => {
-    return filteredPools.find(p => p.index === formData.poolIndex) || filteredPools[0]
-  }, [filteredPools, formData.poolIndex])
+    const poolIndex = selectedPoolIndex ?? formData.poolIndex
+    return filteredPools.find(p => p.index === poolIndex) || filteredPools[0]
+  }, [filteredPools, selectedPoolIndex, formData.poolIndex])
 
   // 获取代币信息
   const getTokenDecimals = useCallback((address: string) => {
@@ -377,6 +315,7 @@ export function SwapInterface() {
           indexPath: selectedPoolIndex ? [selectedPoolIndex] : undefined, // 传入用户选择的池子
           tokenInDecimals: getTokenDecimals(formData.tokenIn),
           tokenOutDecimals: getTokenDecimals(formData.tokenOut),
+          preloadedPools: availablePools,  // ✅ 传递已查询的池子列表，避免重复查询
         })
 
         console.log('Quote result:', quote)
@@ -402,12 +341,14 @@ export function SwapInterface() {
                 console.log(`🔄 智能路由覆盖用户选择: Pool #${selectedPoolIndex} → Pool #${smartRoutedPoolIndex}`)
                 console.log(`   原因: 用户选择的池子价格极端，智能路由选择了价格合理的池子`)
                 setSelectedPoolIndex(smartRoutedPoolIndex)
+                setFormData(prev => ({ ...prev, poolIndex: smartRoutedPoolIndex })) // ✅ 同步更新
               }
             }
 
             // 如果用户没有手动选择池子，使用智能路由的结果
             if (!selectedPoolIndex && smartRoutedPoolIndex !== undefined) {
               setSelectedPoolIndex(smartRoutedPoolIndex)
+              setFormData(prev => ({ ...prev, poolIndex: smartRoutedPoolIndex })) // ✅ 同步更新
             }
           }
 
@@ -434,6 +375,7 @@ export function SwapInterface() {
           indexPath: selectedPoolIndex ? [selectedPoolIndex] : undefined, // 传入用户选择的池子
           tokenInDecimals: getTokenDecimals(formData.tokenIn),
           tokenOutDecimals: getTokenDecimals(formData.tokenOut),
+          preloadedPools: availablePools,  // ✅ 传递已查询的池子列表，避免重复查询
         })
 
         console.log('Reverse quote result:', amountInNeeded)
@@ -447,6 +389,7 @@ export function SwapInterface() {
             // 只在没有手动选择池子时才更新
             if (!selectedPoolIndex) {
               setSelectedPoolIndex(reversePoolIndex)
+              setFormData(prev => ({ ...prev, poolIndex: reversePoolIndex })) // ✅ 同步更新
             }
           }
 
@@ -537,7 +480,7 @@ export function SwapInterface() {
 
   // 处理代币选择
   const handleTokenChange = (field: 'tokenIn' | 'tokenOut', value: string) => {
-    setFormData(prev => ({ ...prev, [field]: value, amountIn: '', amountOut: '' }))
+    setFormData(prev => ({ ...prev, [field]: value, amountIn: '', amountOut: '', poolIndex: 0 })) // ✅ 重置池子索引
     setQuoteError(null)
     setSelectedPoolIndex(null) // 切换代币时清空池子选择，让系统重新自动选择
     setShowPoolSelector(false)
@@ -556,10 +499,15 @@ export function SwapInterface() {
       })
     }
     setSelectedPoolIndex(poolIndex)
+    setFormData(prev => ({ ...prev, poolIndex })) // ✅ 同步更新 formData.poolIndex
     setQuoteError(null) // 清除之前的错误
     setShowPoolSelector(false) // 关闭选择器
-    // 触发重新获取报价
-    setFormData(prev => ({ ...prev, amountOut: '' }))
+
+    // ✅ 修复：立即触发重新获取报价
+    // 使用 setTimeout 确保状态已更新
+    setTimeout(() => {
+      updateQuoteRef.current()
+    }, 100)
   }
 
   // 交换代币
@@ -570,8 +518,10 @@ export function SwapInterface() {
       tokenOut: prev.tokenIn,
       amountIn: prev.amountOut,
       amountOut: prev.amountIn,
+      poolIndex: 0, // ✅ 重置池子索引
     }))
     setIsExactInput(!isExactInput)
+    setSelectedPoolIndex(null) // ✅ 清除手动选择的池子
     setQuoteError(null)
   }
 
@@ -596,17 +546,21 @@ export function SwapInterface() {
         ? TOKENS.ETH.wrappedAddress
         : formData.tokenIn
 
+      // ✅ 设置标记：授权成功后继续交易
+      setPendingSwapAfterApprove(true)
+
       approveToken(actualTokenIn, formData.amountIn, getTokenDecimals(formData.tokenIn))
       // 注意：approveToken 内部会调用 writeContract，交易提交后会触发 isPending
-      // 等待交易确认后在 isConfirmed effect 中刷新
+      // ✅ 授权成功后会在 isConfirmed effect 中自动触发 swap
     } catch (error) {
       console.error('Approval failed:', error)
       message.error('Approve failed')
+      setPendingSwapAfterApprove(false)  // 失败时清除标记
     }
   }
 
   // Swap
-  const handleSwap = async () => {
+  const handleSwap = useCallback(async () => {
     if (!formData.amountIn || !formData.amountOut || !isConnected) return
     if (needsApprove) {
       setQuoteError('授权不足，请先点击 Approve')
@@ -624,6 +578,7 @@ export function SwapInterface() {
       console.log(`⚠️ 用户选择的池子 #${selectedPoolIndex} 价格极端，切换到池子 #${betterPool.index}`)
       poolIndexToUse = betterPool.index
       setSelectedPoolIndex(betterPool.index) // 更新状态
+      setFormData(prev => ({ ...prev, poolIndex: betterPool.index })) // ✅ 同步更新
     }
 
     if (poolIndexToUse === null) {
@@ -635,6 +590,7 @@ export function SwapInterface() {
     console.log('Using pool index:', poolIndexToUse)
     console.log('User selected:', selectedPoolIndex)
     console.log('Better pool available:', betterPool?.index)
+    console.log('Swap type:', isExactInput ? 'exactInput' : 'exactOutput')
     console.log('============================\n')
 
     try {
@@ -642,10 +598,13 @@ export function SwapInterface() {
         tokenIn: formData.tokenIn,
         tokenOut: formData.tokenOut,
         amountIn: formData.amountIn,
+        amountOut: formData.amountOut,  // ✅ 新增：传递 amountOut
         slippage: formData.slippage,
         indexPath: [poolIndexToUse], // 使用正确的池子索引
         tokenInDecimals: getTokenDecimals(formData.tokenIn),
         tokenOutDecimals: getTokenDecimals(formData.tokenOut),
+        isExactInput: isExactInput,  // ✅ 新增：传递 swap 类型
+        preloadedPools: availablePools,  // ✅ 新增：传递已查询的池子列表，避免重复查询
       })
       // 注意：executeSwap 内部会调用 writeContract，交易提交后会触发 isPending
       // 等待交易确认后在 isConfirmed effect 中处理
@@ -655,23 +614,61 @@ export function SwapInterface() {
       setQuoteError(errorMsg)
       message.error(errorMsg)
     }
-  }
+  }, [formData, needsApprove, availablePools, selectedPoolIndex, isConnected, executeSwap, getTokenDecimals, isExactInput, message])
+
+  // ✅ 使用 ref 存储 handleSwap，避免循环依赖
+  const handleSwapRef = useRef(handleSwap)
+  handleSwapRef.current = handleSwap
 
   // 交易成功后刷新状态
   useEffect(() => {
     if (isConfirmed && hash) {
+      console.log('Transaction confirmed:', hash)
+
       // 刷新授权状态
       refetchAllowance()
+
       // 刷新余额 - 延迟一下等待链上状态更新
       setTimeout(() => {
         refetchBalanceIn()
         refetchBalanceOut()
       }, 2000)
-      // 清空输入
-      setFormData(prev => ({ ...prev, amountIn: '', amountOut: '' }))
-      message.success('Transaction confirmed!')
+
+      // ✅ 如果是授权交易成功，等待 allowance 更新后继续 swap
+      if (pendingSwapAfterApprove) {
+        console.log('✅ Authorization confirmed, checking allowance...')
+        // allowance 更新后会在另一个 effect 中触发 swap
+      } else {
+        // Swap 交易成功
+        setFormData(prev => ({ ...prev, amountIn: '', amountOut: '' }))
+        message.success('Transaction confirmed!')
+      }
     }
-  }, [isConfirmed, hash, refetchAllowance, refetchBalanceIn, refetchBalanceOut])
+  }, [isConfirmed, hash, refetchAllowance, refetchBalanceIn, refetchBalanceOut, pendingSwapAfterApprove])
+
+  // ✅ 新增：监听 allowance 变化，自动触发 swap
+  useEffect(() => {
+    if (pendingSwapAfterApprove && allowance && formData.amountIn) {
+      console.log('Checking allowance after approval...', formatUnits(allowance as bigint, 18))
+
+      try {
+        const amountWei = parseUnits(formData.amountIn, getTokenDecimals(formData.tokenIn))
+        if (allowance >= amountWei) {
+          console.log('✅ Allowance sufficient, triggering swap...')
+          setPendingSwapAfterApprove(false)  // 清除标记
+
+          // 自动触发 swap（使用 ref 避免循环依赖）
+          setTimeout(() => {
+            if (!needsApprove) {
+              handleSwapRef.current()
+            }
+          }, 300)
+        }
+      } catch (error) {
+        console.error('Error checking allowance:', error)
+      }
+    }
+  }, [allowance, pendingSwapAfterApprove, formData.amountIn, formData.tokenIn, getTokenDecimals, needsApprove])
 
   // 准备代币选项
   const tokenOptions = useMemo(() => {
@@ -762,10 +759,11 @@ export function SwapInterface() {
               <Input
                 value={formData.amountIn}
                 onChange={(e) => handleAmountChange('amountIn', e.target.value)}
-                placeholder="0.0"
+                placeholder={isQuoting && !isExactInput ? "价格估算中..." : "0.0"}
                 size="large"
                 className="text-2xl font-bold"
                 status={isInsufficientBalance ? 'error' : undefined}
+                disabled={isQuoting && isExactInput}
                 style={{
                   backgroundColor: 'transparent',
                   border: 'none',
@@ -773,6 +771,11 @@ export function SwapInterface() {
                   fontWeight: 'bold',
                 }}
               />
+              {isQuoting && isExactInput && (
+                <div className="absolute right-2 top-1/2 -translate-y-1/2">
+                  <Spin size="small" />
+                </div>
+              )}
               {isInsufficientBalance && (
                 <p className="text-red-500 text-sm mt-1">
                   Insufficient balance. Available: {balanceIn ? formatUnits(balanceIn.value, balanceIn.decimals) : '0'}
@@ -817,7 +820,7 @@ export function SwapInterface() {
                 <Input
                   value={formData.amountOut}
                   onChange={(e) => handleAmountChange('amountOut', e.target.value)}
-                  placeholder="0.0"
+                  placeholder={isQuoting && isExactInput ? "价格估算中..." : "0.0"}
                   size="large"
                   className="text-2xl font-bold"
                   disabled={isQuoting && !isExactInput}

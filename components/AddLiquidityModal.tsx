@@ -75,6 +75,7 @@ export function AddLiquidityModal({ onClose, initialToken0, initialToken1, onSuc
   const [availablePools, setAvailablePools] = useState<PoolInfo[]>([])
   const [needsApproval0, setNeedsApproval0] = useState(false)
   const [needsApproval1, setNeedsApproval1] = useState(false)
+  const [pendingAddLiquidityAfterApprove, setPendingAddLiquidityAfterApprove] = useState(false) // ✅ 新增：标记授权后是否需要继续添加流动性
 
   // 监听表单中的代币选择
   const token0 = Form.useWatch('token0', form)
@@ -95,137 +96,70 @@ export function AddLiquidityModal({ onClose, initialToken0, initialToken1, onSuc
       console.log('Token0:', token0)
       console.log('Token1:', token1)
 
-      // 将 ETH 地址转换为 WETH 地址
-      const WETH_SEPOLIA = '0xfff9976782d46cc05630d1f6ebab18b2324d6b14'
-      const WETH_MAINNET = '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2'
-      const ETH_ADDRESS = '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE'
+      try {
+        // ✅ 优化：使用 getAllPools() 一次性获取所有池子
+        console.log('🔄 Fetching all pools from contract...')
+        const startTime = Date.now()
 
-      const normalizeAddress = (addr: string) => {
-        if (addr.toLowerCase() === ETH_ADDRESS.toLowerCase()) {
-          return WETH_SEPOLIA.toLowerCase() // 使用 Sepolia WETH 地址
-        }
-        return addr.toLowerCase()
-      }
+        const allPools = await publicClient.readContract({
+          address: CONTRACTS.POOL_MANAGER as `0x${string}`,
+          abi: POOL_MANAGER_ABI,
+          functionName: 'getAllPools',
+        })
 
-      const normalizedToken0 = normalizeAddress(token0)
-      const normalizedToken1 = normalizeAddress(token1)
+        const fetchTime = Date.now() - startTime
+        console.log(`✅ Got ${allPools.length} pools in ${fetchTime}ms`)
 
-      // 确保地址顺序正确（token0 < token1）
-      let [sortedToken0, sortedToken1] = normalizedToken0 < normalizedToken1
-        ? [normalizedToken0, normalizedToken1]
-        : [normalizedToken1, normalizedToken0]
+        // 将 ETH 地址转换为 WETH 地址
+        const WETH_SEPOLIA = '0xfff9976782d46cc05630d1f6ebab18b2324d6b14'
+        const WETH_MAINNET = '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2'
+        const ETH_ADDRESS = '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE'
 
-      console.log('Querying pools for:', sortedToken0, '/', sortedToken1)
-
-      // 尝试查询多个池子索引
-      const foundPools: PoolInfo[] = []
-      for (let i = 0; i <= 10; i++) {
-        try {
-          const poolAddress = await publicClient.readContract({
-            address: CONTRACTS.POOL_MANAGER as `0x${string}`,
-            abi: POOL_MANAGER_ABI,
-            functionName: 'getPool',
-            args: [sortedToken0 as `0x${string}`, sortedToken1 as `0x${string}`, i],
-          })
-
-          if (poolAddress && poolAddress !== '0x0000000000000000000000000000000000000000') {
-            console.log(`✅ Found pool at index ${i}: ${poolAddress}`)
-
-            // 获取池子详细信息
-            try {
-              const POOL_ABI = [
-                {
-                  name: 'token0',
-                  type: 'function',
-                  stateMutability: 'view',
-                  inputs: [],
-                  outputs: [{ name: '', type: 'address' }],
-                },
-                {
-                  name: 'token1',
-                  type: 'function',
-                  stateMutability: 'view',
-                  inputs: [],
-                  outputs: [{ name: '', type: 'address' }],
-                },
-                {
-                  name: 'fee',
-                  type: 'function',
-                  stateMutability: 'view',
-                  inputs: [],
-                  outputs: [{ name: '', type: 'uint24' }],
-                },
-                {
-                  name: 'liquidity',
-                  type: 'function',
-                  stateMutability: 'view',
-                  inputs: [],
-                  outputs: [{ name: '', type: 'uint128' }],
-                },
-                {
-                  name: 'sqrtPriceX96',
-                  type: 'function',
-                  stateMutability: 'view',
-                  inputs: [],
-                  outputs: [{ name: '', type: 'uint160' }],
-                },
-              ] as const
-
-              const [poolToken0, poolToken1, fee, liquidity, sqrtPriceX96] = await Promise.all([
-                publicClient.readContract({
-                  address: poolAddress,
-                  abi: POOL_ABI,
-                  functionName: 'token0',
-                }),
-                publicClient.readContract({
-                  address: poolAddress,
-                  abi: POOL_ABI,
-                  functionName: 'token1',
-                }),
-                publicClient.readContract({
-                  address: poolAddress,
-                  abi: POOL_ABI,
-                  functionName: 'fee',
-                }),
-                publicClient.readContract({
-                  address: poolAddress,
-                  abi: POOL_ABI,
-                  functionName: 'liquidity',
-                }),
-                publicClient.readContract({
-                  address: poolAddress,
-                  abi: POOL_ABI,
-                  functionName: 'sqrtPriceX96',
-                }),
-              ])
-
-              foundPools.push({
-                pool: poolAddress as string,
-                token0: poolToken0 as string,
-                token1: poolToken1 as string,
-                index: i,
-                fee: Number(fee),
-                feeProtocol: 0,
-                tickLower: 0,
-                tickUpper: 0,
-                tick: 0,
-                sqrtPriceX96: sqrtPriceX96 as bigint,
-                liquidity: liquidity as bigint,
-              })
-
-              console.log(`  Fee: ${fee}, Liquidity: ${liquidity}`)
-            } catch (error) {
-              console.log(`  ⚠️  Could not fetch pool details for ${poolAddress}`)
-            }
+        const normalizeAddress = (addr: string) => {
+          if (addr.toLowerCase() === ETH_ADDRESS.toLowerCase()) {
+            return WETH_SEPOLIA.toLowerCase()
           }
-        } catch (error) {
-          // 索引不存在，停止查询
-          break
+          return addr.toLowerCase()
         }
-      }
 
-      console.log(`\nTotal pools found: ${foundPools.length}`)
-      setAvailablePools(foundPools)
+        const normalizedToken0 = normalizeAddress(token0)
+        const normalizedToken1 = normalizeAddress(token1)
+
+        // 前端过滤特定代币对的池子
+        const foundPools: PoolInfo[] = allPools
+          .filter((pool: any) => {
+            const matchNormal =
+              pool.token0.toLowerCase() === normalizedToken0 &&
+              pool.token1.toLowerCase() === normalizedToken1
+            const matchReverse =
+              pool.token0.toLowerCase() === normalizedToken1 &&
+              pool.token1.toLowerCase() === normalizedToken0
+            return matchNormal || matchReverse
+          })
+          .map((pool: any) => ({
+            pool: pool.pool,
+            token0: pool.token0,
+            token1: pool.token1,
+            index: Number(pool.index),
+            fee: Number(pool.fee),
+            feeProtocol: Number(pool.feeProtocol) || 0,
+            tickLower: Number(pool.tickLower) || 0,
+            tickUpper: Number(pool.tickUpper) || 0,
+            tick: Number(pool.tick) || 0,
+            sqrtPriceX96: pool.sqrtPriceX96,
+            liquidity: pool.liquidity,
+          }))
+
+        console.log(`✅ Found ${foundPools.length} pools for this pair`)
+        foundPools.forEach((pool) => {
+          console.log(`  Pool #${pool.index}: Fee=${(pool.fee/10000).toFixed(2)}%, Liquidity=${pool.liquidity.toString()}`)
+        })
+
+        setAvailablePools(foundPools)
+      } catch (error) {
+        console.error('❌ Failed to fetch pools:', error)
+        setAvailablePools([])
+      }
     }
 
     queryPoolsForPair()
@@ -291,6 +225,33 @@ export function AddLiquidityModal({ onClose, initialToken0, initialToken1, onSuc
     checkApproval()
   }, [token0, token1, amount0, amount1, allowance0, allowance1, getTokenDecimals])
 
+  // ✅ 新增：监听授权状态变化，自动继续添加流动性
+  useEffect(() => {
+    if (pendingAddLiquidityAfterApprove && allowance0 !== undefined && allowance1 !== undefined) {
+      if (!amount0 || !amount1) return
+
+      const decimals0 = getTokenDecimals(token0)
+      const decimals1 = getTokenDecimals(token1)
+      const amount0Wei = parseUnits(amount0, decimals0)
+      const amount1Wei = parseUnits(amount1, decimals1)
+
+      // 检查两个代币是否都已授权
+      const token0Approved = isNativeTokenAddress(token0) || allowance0 >= amount0Wei
+      const token1Approved = isNativeTokenAddress(token1) || allowance1 >= amount1Wei
+
+      if (token0Approved && token1Approved) {
+        console.log('✅ Authorization confirmed, continuing with add liquidity...')
+        setPendingAddLiquidityAfterApprove(false)
+
+        // 延迟一小段时间让状态更新
+        setTimeout(() => {
+          // 触发表单提交
+          form.submit()
+        }, 300)
+      }
+    }
+  }, [allowance0, allowance1, pendingAddLiquidityAfterApprove, amount0, amount1, token0, token1, form, getTokenDecimals])
+
   // 刷新授权状态和成功回调
   useEffect(() => {
     if (isConfirmed) {
@@ -298,19 +259,22 @@ export function AddLiquidityModal({ onClose, initialToken0, initialToken1, onSuc
       refetchAllowance0()
       refetchAllowance1()
 
-      // ✅ 调用成功回调（用于刷新池子列表）
-      if (onSuccess) {
-        onSuccess()
+      // ✅ 只有在不是授权后自动继续的情况下才调用成功回调和关闭弹窗
+      if (!pendingAddLiquidityAfterApprove) {
+        // ✅ 调用成功回调（用于刷新池子列表）
+        if (onSuccess) {
+          onSuccess()
+        }
+
+        // ✅ 延迟关闭弹窗，让用户看到成功状态
+        const timer = setTimeout(() => {
+          onClose()
+        }, 1500) // 1.5秒后关闭
+
+        return () => clearTimeout(timer)
       }
-
-      // ✅ 延迟关闭弹窗，让用户看到成功状态
-      const timer = setTimeout(() => {
-        onClose()
-      }, 1500) // 1.5秒后关闭
-
-      return () => clearTimeout(timer)
     }
-  }, [isConfirmed, refetchAllowance0, refetchAllowance1, onClose, onSuccess])
+  }, [isConfirmed, refetchAllowance0, refetchAllowance1, onClose, onSuccess, pendingAddLiquidityAfterApprove])
 
   // 处理授权
   const handleApprove = async (tokenAddress: string, amount: string) => {
@@ -318,6 +282,7 @@ export function AddLiquidityModal({ onClose, initialToken0, initialToken1, onSuc
     try {
       await approveToken(tokenAddress, amount, getTokenDecimals(tokenAddress), CONTRACTS.POSITION_MANAGER)
       message.success('Approve transaction submitted!')
+      setPendingAddLiquidityAfterApprove(true) // ✅ 标记授权后需要继续添加流动性
     } catch (error) {
       console.error('Approve failed:', error)
       message.error('Approve failed')
